@@ -2,12 +2,11 @@
 import json
 import boto3
 import os
-import time
 from botocore.exceptions import ClientError
 
 # --- CONFIGURATION ---
 DYNAMODB_TABLE = os.environ.get('TABLE_NAME', 'OncoLifeSessions')
-BEDROCK_REGION = 'us-east-1' # Change to your region
+BEDROCK_REGION = 'us-east-1' 
 MODEL_ID = 'meta.llama3-70b-instruct-v1:0'
 
 # Initialize Clients
@@ -15,9 +14,7 @@ dynamodb = boto3.resource('dynamodb')
 table = dynamodb.Table(DYNAMODB_TABLE)
 bedrock = boto3.client(service_name='bedrock-runtime', region_name=BEDROCK_REGION)
 
-# --- CLINICAL PROTOCOLS (THE BRAIN) ---
-# Strictly defined in Python. No hallucinations possible.
-
+# --- ACTION CARDS ---
 CALL_911 = {
     "title": "CRITICAL EMERGENCY",
     "action": "Call 911 Immediately",
@@ -34,8 +31,18 @@ CONTACT_TEAM = {
     "level": "YELLOW"
 }
 
+MONITOR_HOME = {
+    "title": "MONITOR SYMPTOMS",
+    "action": "Monitor at home",
+    "timing": "As needed",
+    "script": "Watch symptoms and report if they worsen.",
+    "level": "GREEN"
+}
+
+# --- CLINICAL PROTOCOLS (THE BRAIN) ---
 PROTOCOLS = {
-    "URG-109": { # Headache
+    # --- HEADACHE ---
+    "URG-109": {
         "questions": [
             {
                 "id": "Q1",
@@ -45,7 +52,7 @@ PROTOCOLS = {
             },
             {
                 "id": "Q2",
-                "text": "Do you have blurred vision, trouble speaking, or confusion?",
+                "text": "Do you have blurred vision, trouble speaking, weakness, or confusion?",
                 "options": ["Yes", "No"],
                 "logic": {"Yes": {"action": "CARD", "card": CALL_911}, "No": {"action": "NEXT"}}
             },
@@ -56,12 +63,107 @@ PROTOCOLS = {
                 "logic": {
                     "Severe": {"action": "CARD", "card": CONTACT_TEAM},
                     "Moderate": {"action": "CARD", "card": CONTACT_TEAM},
-                    "Mild": {"action": "CARD", "card": {"title": "MONITOR", "action": "Monitor at home", "timing": "As needed", "script": "Watch symptoms", "level": "GREEN"}}
+                    "Mild": {"action": "CARD", "card": MONITOR_HOME}
                 }
             }
         ]
     },
-    # Add other modules (URG-111, URG-103) here following the same pattern
+    
+    # --- BLEEDING ---
+    "URG-103": {
+        "questions": [
+            {
+                "id": "Q1",
+                "text": "Are you bleeding and the bleeding won't stop with pressure?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": CALL_911}, "No": {"action": "NEXT"}}
+            },
+            {
+                "id": "Q2",
+                "text": "Do you have a significant amount of blood in your stool or urine?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": {"title": "GI BLEED", "action": "Go to ER", "level": "RED", "timing": "Now", "script": "Possible internal bleeding"}}, "No": {"action": "NEXT"}}
+            },
+            {
+                "id": "Q3",
+                "text": "Is the bruising/bleeding in one area or all over?",
+                "options": ["One area", "All over", "None"],
+                "logic": {
+                    "All over": {"action": "CARD", "card": CONTACT_TEAM},
+                    "One area": {"action": "CARD", "card": {"title": "MONITOR", "action": "Message Care Team", "level": "AMBER", "timing": "Today", "script": "Report bruising"}},
+                    "None": {"action": "CARD", "card": MONITOR_HOME}
+                }
+            }
+        ]
+    },
+
+    # --- LEG PAIN ---
+    "URG-111": {
+        "questions": [
+            {
+                "id": "Q1",
+                "text": "Is your leg swollen, red, or warm to the touch?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": {"title": "POSSIBLE DVT", "action": "Go to ER", "level": "RED", "timing": "Now", "script": "Possible blood clot"}}, "No": {"action": "NEXT"}}
+            },
+            {
+                "id": "Q2",
+                "text": "Is the pain worse when you walk or press on your calf?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": {"title": "POSSIBLE DVT", "action": "Go to ER", "level": "RED", "timing": "Now", "script": "Possible blood clot"}}, "No": {"action": "NEXT"}}
+            },
+            {
+                "id": "Q3",
+                "text": "Rate the pain.",
+                "options": ["Mild", "Moderate", "Severe"],
+                "logic": {
+                    "Severe": {"action": "CARD", "card": CONTACT_TEAM},
+                    "Moderate": {"action": "CARD", "card": CONTACT_TEAM},
+                    "Mild": {"action": "CARD", "card": MONITOR_HOME}
+                }
+            }
+        ]
+    },
+
+    # --- PORT PAIN ---
+    "URG-114": {
+        "questions": [
+            {
+                "id": "Q1",
+                "text": "Is the area around your port red, swollen, or draining fluid?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": CONTACT_TEAM}, "No": {"action": "NEXT"}}
+            },
+            {
+                "id": "Q2",
+                "text": "Do you have a fever > 100.3F?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": CONTACT_TEAM}, "No": {"action": "CARD", "card": MONITOR_HOME}}
+            }
+        ]
+    },
+
+    # --- GENERIC FALLBACK ---
+    "GENERIC": {
+        "questions": [
+            {
+                "id": "Q1",
+                "text": "Does this symptom interfere with your daily activities?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": CONTACT_TEAM}, "No": {"action": "NEXT"}}
+            },
+            {
+                "id": "Q2",
+                "text": "Rate the severity.",
+                "options": ["Mild", "Moderate", "Severe"],
+                "logic": {
+                    "Severe": {"action": "CARD", "card": CONTACT_TEAM},
+                    "Moderate": {"action": "CARD", "card": CONTACT_TEAM},
+                    "Mild": {"action": "CARD", "card": MONITOR_HOME}
+                }
+            }
+        ]
+    }
 }
 
 # --- HELPER FUNCTIONS ---
@@ -123,13 +225,16 @@ def lambda_handler(event, context):
 
         # 2. INITIALIZE IF NEW
         if not state:
-            if not start_module or start_module not in PROTOCOLS:
-                # Default to Generic if module not found
-                start_module = "URG-109" 
+            if not start_module:
+                 # If no module and no state, default to generic
+                 start_module = "GENERIC"
+            
+            # Map frontend codes to our internal keys if needed, or use directly
+            module_key = start_module if start_module in PROTOCOLS else "GENERIC"
             
             state = {
                 'session_id': session_id,
-                'current_module': start_module,
+                'current_module': module_key,
                 'q_index': 0,
                 'history': []
             }
@@ -185,7 +290,7 @@ def lambda_handler(event, context):
                 }
             else:
                 # End of flow default
-                response_payload = {'actionCard': {"title": "COMPLETE", "action": "Monitor", "level": "GREEN"}}
+                response_payload = {'actionCard': MONITOR_HOME}
 
         return {
             'statusCode': 200,
@@ -194,7 +299,7 @@ def lambda_handler(event, context):
         }
 
     except Exception as e:
-        print(e)
+        print(f"Error: {e}")
         return {
             'statusCode': 500,
             'headers': {'Access-Control-Allow-Origin': '*'},

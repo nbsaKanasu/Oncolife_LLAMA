@@ -23,36 +23,46 @@ PART 1: INFRASTRUCTURE SETUP
 
 2. **AWS BEDROCK**
    - Go to Bedrock Console -> Model access.
-   - Ensure "Llama 3 70B Instruct" is enabled.
+   - Ensure "Llama 3 70B Instruct" is enabled (Region: us-east-1 recommended).
 
 ----------------------------------------------------
 PART 2: DEPLOYING THE BACKEND (LAMBDA)
 ----------------------------------------------------
-1. Go to the 'backend' folder.
-2. Rename 'lambda_function.txt' to 'lambda_function.py'.
-3. Create a deployment zip:
-   - Create a folder named 'package'.
-   - Run: `pip install --target ./package boto3`
-   - Copy 'lambda_function.py' into 'package'.
-   - Zip the contents of 'package'.
-4. Create Lambda Function:
-   - Runtime: Python 3.9+
-   - Upload Zip.
+1. Go to the 'AWS_LLAMA/backend' folder.
+2. **RENAME FILE**: 
+   - Rename `lambda_function.txt` to `lambda_function.py`.
+3. Create a deployment package:
+   - Create a new folder named `package`.
+   - Open terminal in `backend` folder.
+   - Run: `pip install --target ./package -r requirements.txt`
+   - Copy `lambda_function.py` into the `package` folder.
+   - Zip the contents of the `package` folder (Select all files inside -> Right Click -> Compress/Zip).
+4. Create Lambda Function in AWS:
+   - Runtime: Python 3.9 (or newer).
+   - Upload the Zip file you just created.
 5. **PERMISSIONS (Crucial)**
-   - Go to Configuration -> Permissions -> Execution Role.
-   - Add permissions for:
+   - Go to Configuration -> Permissions -> Execution Role -> Edit.
+   - Attach policies or add inline policy to allow:
      a. `bedrock:InvokeModel`
-     b. `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:UpdateItem`
+     b. `dynamodb:GetItem`
+     c. `dynamodb:PutItem`
+     d. `dynamodb:UpdateItem`
 6. **ENVIRONMENT VARIABLES**
    - Go to Configuration -> Environment variables.
-   - Add: `TABLE_NAME` = `OncoLifeSessions`
-7. Create Function URL (Auth: NONE for testing) and COPY IT.
+   - Add Key: `TABLE_NAME` | Value: `OncoLifeSessions`
+7. **FUNCTION URL**
+   - Go to Configuration -> Function URL.
+   - Create function URL (Auth type: NONE for initial testing).
+   - **COPY THIS URL**. You need it for the frontend.
 
 ----------------------------------------------------
 PART 3: DEPLOYING THE FRONTEND
 ----------------------------------------------------
-1. Go to 'frontend' folder.
-2. Create '.env' file:
-   `VITE_AWS_API_URL=https://<YOUR_LAMBDA_URL>`
-3. Run `npm install` and `npm run build`.
-4. Deploy the `dist` folder to AWS Amplify or S3.
+1. Go to 'AWS_LLAMA/frontend' folder.
+2. Create a file named `.env`:
+   - Content: `VITE_AWS_API_URL=https://<YOUR_COPIED_LAMBDA_URL>`
+3. Install & Build:
+   - Run `npm install`
+   - Run `npm run build`
+4. Deploy:
+   - Upload the contents of the `dist` folder to AWS Amplify, S3 (Static Hosting), or Vercel.
