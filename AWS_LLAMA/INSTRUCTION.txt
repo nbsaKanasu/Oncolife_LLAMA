@@ -19,7 +19,7 @@ PART 1: INFRASTRUCTURE SETUP
    - Table Name: `OncoLifeSessions`
    - Partition Key: `session_id` (String)
    - Sort Key: (Leave empty)
-   - Settings: Default settings are fine (On-demand capacity recommended).
+   - Capacity: On-demand is recommended for development.
 
 2. **AWS BEDROCK**
    - Go to Bedrock Console -> Model access.
@@ -28,25 +28,26 @@ PART 1: INFRASTRUCTURE SETUP
 ----------------------------------------------------
 PART 2: DEPLOYING THE BACKEND (LAMBDA)
 ----------------------------------------------------
-1. Go to the 'AWS_LLAMA/backend' folder.
-2. **RENAME FILE**: 
-   - Rename `lambda_function.txt` to `lambda_function.py`.
+1. Navigate to the 'AWS_LLAMA/backend' folder.
+2. **CRITICAL STEP**: 
+   - Rename the file `lambda_function.txt` to `lambda_function.py`.
+   - The file was provided as .txt to avoid local execution errors, but AWS needs .py.
 3. Create a deployment package:
    - Create a new folder named `package`.
    - Open terminal in `backend` folder.
    - Run: `pip install --target ./package -r requirements.txt`
-   - Copy `lambda_function.py` into the `package` folder.
+   - Copy the renamed `lambda_function.py` into the `package` folder.
    - Zip the contents of the `package` folder (Select all files inside -> Right Click -> Compress/Zip).
 4. Create Lambda Function in AWS:
    - Runtime: Python 3.9 (or newer).
+   - Handler: `lambda_function.lambda_handler` (Default).
    - Upload the Zip file you just created.
 5. **PERMISSIONS (Crucial)**
    - Go to Configuration -> Permissions -> Execution Role -> Edit.
-   - Attach policies or add inline policy to allow:
+   - Add permissions to allow:
      a. `bedrock:InvokeModel`
      b. `dynamodb:GetItem`
      c. `dynamodb:PutItem`
-     d. `dynamodb:UpdateItem`
 6. **ENVIRONMENT VARIABLES**
    - Go to Configuration -> Environment variables.
    - Add Key: `TABLE_NAME` | Value: `OncoLifeSessions`
@@ -66,3 +67,12 @@ PART 3: DEPLOYING THE FRONTEND
    - Run `npm run build`
 4. Deploy:
    - Upload the contents of the `dist` folder to AWS Amplify, S3 (Static Hosting), or Vercel.
+
+----------------------------------------------------
+PART 4: VERIFICATION
+----------------------------------------------------
+- After deployment, open the website.
+- Start a chat.
+- Go to AWS DynamoDB Console -> Tables -> OncoLifeSessions -> Explore Table items.
+- You should see a new entry with your `session_id`.
+- If you refresh the page, the Frontend should now retrieve the same session ID from localStorage and allow you to continue (provided you implement history fetching in Lambda, otherwise it simply maintains the ID for consistent tracking).

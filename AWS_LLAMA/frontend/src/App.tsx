@@ -46,17 +46,23 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [sessionId, setSessionId] = useState<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [showEndSessionConfirm, setShowEndSessionConfirm] = useState<boolean>(false);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  const generateSession = () => {
-     setSessionId(`sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
-  };
-
+  // --- SESSION MANAGEMENT WITH PERSISTENCE ---
   useEffect(() => {
-    generateSession();
+    const savedSession = localStorage.getItem('oncolife_aws_session');
+    if (savedSession) {
+      setSessionId(savedSession);
+      // Optional: You could fetch history here if backend supported it
+    } else {
+      const newSession = `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setSessionId(newSession);
+      localStorage.setItem('oncolife_aws_session', newSession);
+    }
   }, []);
 
   const handleStartConsultation = async () => {
@@ -109,6 +115,19 @@ const App: React.FC = () => {
 
   const toggleSymptom = (name: string, code: string) => {
       setSelectedSymptoms([{ name, code }]);
+  };
+
+  const handleEndSession = () => {
+      // Clear session from local storage to truly reset
+      localStorage.removeItem('oncolife_aws_session');
+      const newSession = `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setSessionId(newSession);
+      localStorage.setItem('oncolife_aws_session', newSession);
+      
+      setView('triage-wizard');
+      setMessages([]);
+      setSelectedSymptoms([]);
+      setShowEndSessionConfirm(false);
   };
 
   return (
@@ -177,6 +196,12 @@ const App: React.FC = () => {
       {view === 'chat' && (
         <main className="flex-1 overflow-y-auto p-4 bg-slate-50 flex flex-col">
             <div className="max-w-3xl mx-auto w-full flex-1 pb-24">
+                <div className="flex justify-end mb-4">
+                    <button onClick={() => setShowEndSessionConfirm(true)} className="text-xs font-bold text-slate-400 hover:text-red-500 flex items-center gap-1 transition-colors">
+                        <LogOut size={12} /> END SESSION
+                    </button>
+                </div>
+
                {messages.map(msg => (
                    <div key={msg.id}>
                        <ChatMessage message={msg} onOptionSelect={handleSendMessage} />
@@ -213,6 +238,20 @@ const App: React.FC = () => {
             </div>
         </main>
       )}
+
+        {showEndSessionConfirm && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+              <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 text-center">
+                  <h3 className="text-lg font-bold text-slate-800 mb-2">End Consultation?</h3>
+                  <p className="text-sm text-slate-600 mb-6">This will clear your chat history. Are you sure?</p>
+                  <div className="flex gap-4">
+                    <button onClick={() => setShowEndSessionConfirm(false)} className="flex-1 py-3 text-slate-600 bg-slate-100 rounded-xl font-medium hover:bg-slate-200">Cancel</button>
+                    <button onClick={handleEndSession} className="flex-1 py-3 text-white bg-red-600 rounded-xl font-bold hover:bg-red-700">End Session</button>
+                  </div>
+              </div>
+            </div>
+          )}
+
       <Footer />
     </div>
   );
