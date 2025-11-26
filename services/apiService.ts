@@ -1,9 +1,8 @@
 import { Message, ActionCard } from "../types";
 import { SYSTEM_INSTRUCTION } from "../constants";
 
-// You would typically set this in your .env file
-// For now, this is where you paste your AWS API Gateway URL
-const API_URL = process.env.REACT_APP_AWS_API_URL || "https://your-api-gateway-url.amazonaws.com/prod/chat";
+// Retrieve the AWS API Gateway URL from environment variables
+const API_URL = process.env.AWS_API_URL || "https://your-api-gateway-url.amazonaws.com/prod/chat";
 
 interface AIResponse {
   text: string;
@@ -14,7 +13,7 @@ interface AIResponse {
 export const sendMessageToAWS = async (messages: Message[]): Promise<AIResponse> => {
   try {
     // 1. Format history for the backend
-    // We filter out error messages and only send role/text
+    // We filter out error messages and only send role/text to keep payload clean
     const historyPayload = messages
       .filter(m => !m.isError)
       .map(m => ({
@@ -22,7 +21,7 @@ export const sendMessageToAWS = async (messages: Message[]): Promise<AIResponse>
         text: m.text
       }));
 
-    // 2. Call AWS Lambda
+    // 2. Call AWS Lambda via API Gateway
     const response = await fetch(API_URL, {
       method: 'POST',
       headers: {
@@ -41,7 +40,8 @@ export const sendMessageToAWS = async (messages: Message[]): Promise<AIResponse>
     const data = await response.json();
     const rawText = data.text || "";
 
-    // 3. Parse JSON Logic (Same as before, but handled after fetching)
+    // 3. Parse JSON Logic 
+    // The Lambda returns raw text; we must extract options/actionCards on the client side
     let displayText = rawText;
     let options: string[] | undefined = undefined;
     let actionCard: ActionCard | undefined = undefined;
@@ -80,7 +80,7 @@ export const sendMessageToAWS = async (messages: Message[]): Promise<AIResponse>
       }
     }
 
-    // Cleanup Markdown
+    // Cleanup Markdown artifacts (Llama 3 sometimes wraps output in ```json ... ```)
     displayText = displayText.replace(/```json/g, "").replace(/```/g, "").trim();
 
     return { text: displayText, options, actionCard };
@@ -88,16 +88,16 @@ export const sendMessageToAWS = async (messages: Message[]): Promise<AIResponse>
   } catch (error) {
     console.error("AWS API Error:", error);
     
-    // Fallback for demo purposes if no API URL is set
+    // Fallback message if configuration is missing
     if (API_URL.includes("your-api-gateway")) {
         return {
-            text: "CONFIGURATION REQUIRED: Please set your AWS_API_URL in the code to connect to your Lambda function.",
+            text: "CONFIGURATION REQUIRED: The app is trying to connect to AWS, but the API URL is missing. Please set AWS_API_URL in your .env file.",
             options: ["Retry"]
         }
     }
 
     return { 
-      text: "I apologize, but I encountered a connection error. Please wait a moment and try again. If this is a medical emergency, please call 911 immediately.",
+      text: "I apologize, but I encountered a connection error with the server. Please wait a moment and try again. If this is a medical emergency, please call 911 immediately.",
       options: ["Retry"]
     };
   }
