@@ -3,7 +3,7 @@ import boto3
 import os
 
 # Initialize Bedrock client
-# Ensure the region matches where you enabled the Llama 3 model
+# Ensure the region matches where you enabled the Llama 3 model (often us-east-1 or us-west-2)
 bedrock = boto3.client(service_name='bedrock-runtime', region_name='us-east-1') 
 
 # Model ID for Llama 3 70B Instruct
@@ -27,7 +27,9 @@ def format_llama3_prompt(system_prompt, messages):
 def lambda_handler(event, context):
     # 1. Handle CORS (For React Frontend)
     # This allows your frontend hosted on a different domain to call this function
-    if event.get('httpMethod') == 'OPTIONS':
+    http_method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method')
+    
+    if http_method == 'OPTIONS':
         return {
             'statusCode': 200,
             'headers': {
