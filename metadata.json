@@ -1,0 +1,5 @@
+{
+  "name": "OncoLife LLM_LLAMA",
+  "description": "A professional symptom checker for oncology patients powered by Gemini LLM.",
+  "requestFramePermissions": []
+}
