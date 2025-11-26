@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Send, Loader2, AlertOctagon, Phone, Activity, AlertTriangle, CheckCircle2, Check, Search, LogOut, RotateCcw } from 'lucide-react';
-import { sendMessageToAWS } from './services/apiService';
+import { createChatSession, sendMessageToGemini } from './services/geminiService';
 import { Message } from './types';
 import ChatMessage from './components/ChatMessage';
 import TriageCard from './components/TriageCard';
 import Header from './components/Header';
 import Footer from './components/Footer';
 import Button from './components/Button';
+import { Chat } from "@google/genai";
 
 // --- DATA CONSTANTS ---
 
@@ -61,6 +62,7 @@ const App: React.FC = () => {
   const [selectedSymptoms, setSelectedSymptoms] = useState<{name: string, code: string}[]>([]);
   const [symptomSearch, setSymptomSearch] = useState<string>(''); 
   
+  const [chatSession, setChatSession] = useState<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -103,26 +105,26 @@ const App: React.FC = () => {
   const handleStartConsultation = async () => {
     if (selectedSymptoms.length === 0) return;
 
-    setView('chat');
-    setIsLoading(true);
-    
-    const symptomNames = selectedSymptoms.map(s => s.name).join(', ');
-    const symptomCodes = selectedSymptoms.map(s => s.code).join(', ');
+    try {
+      // Initialize Gemini Chat Session
+      const session = createChatSession();
+      setChatSession(session);
+      setView('chat');
+      setIsLoading(true);
+      
+      const symptomNames = selectedSymptoms.map(s => s.name).join(', ');
+      const symptomCodes = selectedSymptoms.map(s => s.code).join(', ');
 
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      text: `I am experiencing: ${symptomNames}`
-    };
-    
-    // We create the new message history locally first
-    const newHistory = [userMsg];
-    setMessages(newHistory);
+      const userMsg: Message = {
+        id: Date.now().toString(),
+        role: 'user',
+        text: `I am experiencing: ${symptomNames}`
+      };
+      
+      setMessages([userMsg]);
 
-    // Initial System Command injected as context (not visible to user, but part of prompt logic)
-    // For Llama, we send this as the User's first hidden instruction or rely on System Prompt in backend.
-    // Here, we append the instruction to the first user message for context.
-    const contextPrompt = `SYSTEM COMMAND: Global Emergency Checks CLEARED.
+      // Context Prompt for Gemini (Hidden instructions)
+      const contextPrompt = `SYSTEM COMMAND: Global Emergency Checks CLEARED.
 User reports symptoms: [${symptomNames}]. 
 Associated Protocol Codes: [${symptomCodes}]. 
 
@@ -132,29 +134,27 @@ INSTRUCTION:
 3. START DIRECTLY with PHASE A (Question 1).
 4. Do NOT skip any Phase A screening questions.
 5. DO NOT use the General Pain Router (PAI-213) if a specific pain code is present.`;
-
-    // Create a temporary history for the API call that includes the context
-    // Note: In a real app, you might handle system context differently.
-    const apiHistory: Message[] = [{
-      ...userMsg,
-      text: contextPrompt // We override the text sent to AI, but keep display text simple
-    }];
       
-    const response = await sendMessageToAWS(apiHistory);
+      const response = await sendMessageToGemini(session, contextPrompt);
       
-    const botMsg: Message = {
-      id: (Date.now() + 1).toString(),
-      role: 'model',
-      text: response.text,
-      options: response.options,
-      actionCard: response.actionCard
-    };
-    setMessages((prev) => [...prev, botMsg]);
-    setIsLoading(false);
+      const botMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'model',
+        text: response.text,
+        options: response.options,
+        actionCard: response.actionCard
+      };
+      setMessages((prev) => [...prev, botMsg]);
+    } catch (error) {
+      console.error("Failed to start session:", error);
+      // Handle error gracefully (maybe show a toast)
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleSendMessage = async (text: string) => {
-    if (!text.trim() || isLoading) return;
+    if (!text.trim() || isLoading || !chatSession) return;
 
     const currentInput = text;
     setInputText('');
@@ -166,12 +166,9 @@ INSTRUCTION:
       text: currentInput
     };
     
-    // Update UI state immediately
-    const updatedMessages = [...messages, userMsg];
-    setMessages(updatedMessages);
+    setMessages((prev) => [...prev, userMsg]);
 
-    // Send full history to AWS (Stateless Lambda needs context)
-    const response = await sendMessageToAWS(updatedMessages);
+    const response = await sendMessageToGemini(chatSession, currentInput);
     
     const botMsg: Message = {
       id: (Date.now() + 1).toString(),
@@ -190,6 +187,7 @@ INSTRUCTION:
     setView('triage-wizard');
     setSelectedSymptoms([]);
     setMessages([]);
+    setChatSession(null);
     setSymptomSearch('');
   };
 
