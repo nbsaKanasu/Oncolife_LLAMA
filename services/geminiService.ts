@@ -1,109 +1,70 @@
 
-import { GoogleGenAI, Chat, GenerateContentResponse, HarmCategory, HarmBlockThreshold } from "@google/genai";
-import { SYSTEM_INSTRUCTION } from "../constants";
-import { ActionCard } from "../types";
+import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 
-export const createChatSession = (): Chat => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) {
-    throw new Error("API_KEY environment variable is not set.");
-  }
+const apiKey = process.env.API_KEY;
+const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
-  const ai = new GoogleGenAI({ apiKey });
-  
-  const chat: Chat = ai.chats.create({
-    model: 'gemini-2.5-flash',
-    config: {
-      systemInstruction: SYSTEM_INSTRUCTION,
-      temperature: 0.0, // Strict adherence to protocol
-      safetySettings: [
-        {
-          category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-          threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-          threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-          threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-          threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        },
-      ],
-    },
-  });
-
-  return chat;
-};
-
-interface GeminiResponse {
-  text: string;
-  options?: string[];
-  actionCard?: ActionCard;
+export interface TranslationResult {
+  selectedOption: string;
+  confidence: 'HIGH' | 'LOW';
 }
 
-export const sendMessageToGemini = async (chat: Chat, message: string): Promise<GeminiResponse> => {
+/**
+ * OPTION 2 ARCHITECTURE:
+ * The LLM is NO LONGER deciding the flow. 
+ * It is ONLY used to map the User's fuzzy text to one of our Strict JSON Options.
+ */
+export const interpretUserResponse = async (
+  userText: string, 
+  questionText: string,
+  options: string[]
+): Promise<string> => {
+  
+  if (!ai) {
+    console.error("API Key missing");
+    return options[0]; // Fallback
+  }
+
   try {
-    const result: GenerateContentResponse = await chat.sendMessage({ message });
-    const rawText = result.text || "";
+    const prompt = `
+    TASK: You are a strict data extraction engine.
+    CONTEXT: The user was asked: "${questionText}"
+    USER ANSWER: "${userText}"
+    ALLOWED OPTIONS: ${JSON.stringify(options)}
 
-    let displayText = rawText;
-    let options: string[] | undefined = undefined;
-    let actionCard: ActionCard | undefined = undefined;
+    INSTRUCTION:
+    1. Map the User Answer to the closest Allowed Option.
+    2. If the user says "Yes", "Yeah", "Correct", "Uh huh" -> Map to "Yes".
+    3. If the user says "No", "Nope", "Negative" -> Map to "No".
+    4. If the user mentions a specific severity (e.g., "It hurts a lot") -> Map to "Severe".
+    5. RETURN ONLY the exact string from the Allowed Options list. Do not add markdown or extra text.
+    `;
 
-    // --- ROBUST REGEX PARSING ---
-
-    // 1. Extract Options: Looks for { "options": [...] } ignoring whitespace
-    // The regex finds the JSON object containing "options" key
-    const optionsRegex = /\{\s*"options":\s*\[.*?\]\s*\}/s;
-    const optionsMatch = rawText.match(optionsRegex);
-
-    if (optionsMatch) {
-      try {
-        const jsonStr = optionsMatch[0];
-        const parsed = JSON.parse(jsonStr);
-        if (parsed.options && Array.isArray(parsed.options)) {
-          options = parsed.options;
-          // Remove the JSON string from the visible text
-          displayText = displayText.replace(jsonStr, "").trim();
-        }
-      } catch (e) {
-        console.warn("JSON Parse Error (Options):", e);
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        temperature: 0.0, // Zero creativity, pure logic
+        topP: 0.1,
       }
+    });
+
+    const result = response.text?.trim() || "";
+
+    // Validation: Ensure the AI returned a valid option
+    const match = options.find(opt => opt.toLowerCase() === result.toLowerCase());
+    
+    if (match) {
+      return match;
+    } else {
+      // If AI failed to map exactly, return the first option (or a safe default) 
+      // In a real app, we might ask the user to clarify.
+      console.warn(`AI returned "${result}", which is not in options. Defaulting to first option.`);
+      return options[0]; 
     }
-
-    // 2. Extract ActionCard: Looks for { "actionCard": { ... } }
-    // This regex captures the actionCard object structure
-    const cardRegex = /\{\s*"actionCard":\s*\{.*\}\s*\}/s;
-    const cardMatch = rawText.match(cardRegex);
-
-    if (cardMatch) {
-      try {
-        const jsonStr = cardMatch[0];
-        const parsed = JSON.parse(jsonStr);
-        if (parsed.actionCard) {
-          actionCard = parsed.actionCard;
-          // Remove the JSON string from the visible text
-          displayText = displayText.replace(jsonStr, "").trim();
-        }
-      } catch (e) {
-        console.warn("JSON Parse Error (ActionCard):", e);
-      }
-    }
-
-    // Cleanup: Remove any residual Markdown code blocks if LLM ignored instructions
-    displayText = displayText.replace(/```json/g, "").replace(/```/g, "").trim();
-
-    return { text: displayText, options, actionCard };
 
   } catch (error) {
-    console.error("Gemini API Error:", error);
-    return { 
-      text: "I apologize, but I encountered a connection error (or rate limit). Please wait a moment and try again. If this is a medical emergency, please call 911 immediately." 
-    };
+    console.error("Gemini Translation Error:", error);
+    return options[0]; // Safe fallback
   }
 };

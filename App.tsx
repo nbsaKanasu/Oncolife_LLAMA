@@ -1,17 +1,16 @@
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Send, Loader2, AlertOctagon, Phone, Activity, AlertTriangle, CheckCircle2, Check, Search, LogOut, RotateCcw } from 'lucide-react';
-import { createChatSession, sendMessageToGemini } from './services/geminiService';
+import { interpretUserResponse } from './services/geminiService';
 import { Message } from './types';
+import { CLINICAL_PROTOCOLS } from './constants';
 import ChatMessage from './components/ChatMessage';
 import TriageCard from './components/TriageCard';
 import Header from './components/Header';
 import Footer from './components/Footer';
 import Button from './components/Button';
-import { Chat } from "@google/genai";
 
 // --- DATA CONSTANTS ---
-
-// Phase 1: Global Emergency Rules (Part 1 of MASTER v2.0 Protocol)
 const GLOBAL_EMERGENCY_CHECKS = [
   { id: 'URG-101', label: 'Trouble breathing or shortness of breath' },
   { id: 'URG-102', label: 'Chest pain' },
@@ -20,7 +19,6 @@ const GLOBAL_EMERGENCY_CHECKS = [
   { id: 'URG-108', label: 'Confusion or Altered Mental Status' }
 ];
 
-// Phase 2: Symptom Categories mapped to Rule IDs (MASTER v2.0)
 const SYMPTOM_GROUPS = {
   "Digestive Health": [
     { name: "Nausea", code: "NAU-203" },
@@ -58,128 +56,127 @@ type ViewState = 'triage-wizard' | 'symptom-selection' | 'chat' | 'emergency-red
 const App: React.FC = () => {
   // --- STATE ---
   const [view, setView] = useState<ViewState>('triage-wizard');
-  
   const [selectedSymptoms, setSelectedSymptoms] = useState<{name: string, code: string}[]>([]);
   const [symptomSearch, setSymptomSearch] = useState<string>(''); 
   
-  const [chatSession, setChatSession] = useState<Chat | null>(null);
+  // Chat UI State
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [showEndSessionConfirm, setShowEndSessionConfirm] = useState<boolean>(false);
 
+  // OPTION 2: ENGINE STATE
+  const [currentModuleId, setCurrentModuleId] = useState<string | null>(null);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState<number>(0);
+  const [isConsultationComplete, setIsConsultationComplete] = useState<boolean>(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // --- EFFECTS ---
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
+
+  // --- ENGINE LOGIC (THE "SYMBOLIC" PART) ---
+
+  const loadModule = (moduleId: string) => {
+    // Check if we have a defined protocol, otherwise use Generic
+    const protocol = CLINICAL_PROTOCOLS[moduleId] || CLINICAL_PROTOCOLS["GENERIC"];
+    setCurrentModuleId(moduleId);
+    setCurrentQuestionIndex(0);
+    setIsConsultationComplete(false);
+
+    // Ask first question immediately
+    const firstQ = protocol.questions[0];
+    addBotMessage(firstQ.text, firstQ.options);
+  };
+
+  const addBotMessage = (text: string, options?: string[], actionCard?: any) => {
+    const msg: Message = {
+      id: Date.now().toString(),
+      role: 'model',
+      text,
+      options,
+      actionCard
+    };
+    setMessages(prev => [...prev, msg]);
+  };
+
+  const processAnswer = async (userText: string) => {
+    if (!currentModuleId || isConsultationComplete) return;
+
+    // 1. Get Current Question Data
+    const protocol = CLINICAL_PROTOCOLS[currentModuleId] || CLINICAL_PROTOCOLS["GENERIC"];
+    const question = protocol.questions[currentQuestionIndex];
+
+    // 2. Call Gemini (Neuro) to Translate "Text" -> "Option"
+    setIsLoading(true);
+    const interpretedAnswer = await interpretUserResponse(userText, question.text, question.options);
+    setIsLoading(false);
+
+    // 3. Find Matching Rule (Symbolic Logic)
+    const rule = question.logic.find(r => r.condition === interpretedAnswer);
+    
+    // Default fallback if no rule matches (shouldn't happen with strict options)
+    if (!rule) {
+       addBotMessage("I didn't quite catch that. Could you please select one of the options?", question.options);
+       return;
+    }
+
+    // 4. Execute Rule Action
+    if (rule.actionType === 'SHOW_CARD') {
+      addBotMessage("Assessment Complete.", undefined, rule.cardData);
+      setIsConsultationComplete(true);
+    } else if (rule.actionType === 'NEXT_QUESTION') {
+      const nextIndex = currentQuestionIndex + 1;
+      if (nextIndex < protocol.questions.length) {
+        setCurrentQuestionIndex(nextIndex);
+        const nextQ = protocol.questions[nextIndex];
+        addBotMessage(nextQ.text, nextQ.options);
+      } else {
+        // End of questions, no alerts triggered
+        addBotMessage("Based on your answers, your symptoms appear stable. Please monitor carefully.", undefined, {
+            title: "MONITOR SYMPTOMS",
+            action: "Home Care / Monitor",
+            timing: "As needed",
+            script: "Keep an eye on symptoms.",
+            level: "GREEN"
+        });
+        setIsConsultationComplete(true);
+      }
+    }
+  };
+
 
   // --- HANDLERS ---
 
-  const handleWizardSelection = (hasEmergency: boolean) => {
-    if (hasEmergency) {
-      setView('emergency-red');
-    } else {
-      setView('symptom-selection');
-    }
-  };
-
-  const toggleSymptom = (name: string, code: string) => {
-    setSelectedSymptoms(prev => {
-      const exists = prev.find(s => s.code === code);
-      if (exists) {
-        return prev.filter(s => s.code !== code);
-      } else {
-        return [...prev, { name, code }];
-      }
-    });
-  };
-
-  const clearSymptoms = () => {
-    setSelectedSymptoms([]);
-  };
-
-  const handleStartConsultation = async () => {
+  const handleStartConsultation = () => {
     if (selectedSymptoms.length === 0) return;
+    
+    // Pick the most urgent symptom (simple heuristic: order in array or predefined priority)
+    // For Option 2 Demo, we just pick the first one.
+    const primarySymptom = selectedSymptoms[0];
+    
+    setView('chat');
+    setMessages([{
+      id: "init",
+      role: "model",
+      text: `I understand you are experiencing ${primarySymptom.name}. Let me ask you a few safety questions.`
+    }]);
 
-    try {
-      // Initialize Gemini Chat Session
-      const session = createChatSession();
-      setChatSession(session);
-      setView('chat');
-      setIsLoading(true);
-      
-      const symptomNames = selectedSymptoms.map(s => s.name).join(', ');
-      const symptomCodes = selectedSymptoms.map(s => s.code).join(', ');
-
-      const userMsg: Message = {
-        id: Date.now().toString(),
-        role: 'user',
-        text: `I am experiencing: ${symptomNames}`
-      };
-      
-      setMessages([userMsg]);
-
-      // Context Prompt for Gemini (Hidden instructions)
-      const contextPrompt = `SYSTEM COMMAND: Global Emergency Checks CLEARED.
-User reports symptoms: [${symptomNames}]. 
-Associated Protocol Codes: [${symptomCodes}]. 
-
-INSTRUCTION: 
-1. Acknowledge the symptoms.
-2. Identify the ONE most clinically urgent module.
-3. START DIRECTLY with PHASE A (Question 1).
-4. Do NOT skip any Phase A screening questions.
-5. DO NOT use the General Pain Router (PAI-213) if a specific pain code is present.`;
-      
-      const response = await sendMessageToGemini(session, contextPrompt);
-      
-      const botMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        text: response.text,
-        options: response.options,
-        actionCard: response.actionCard
-      };
-      setMessages((prev) => [...prev, botMsg]);
-    } catch (error) {
-      console.error("Failed to start session:", error);
-      // Handle error gracefully (maybe show a toast)
-    } finally {
-      setIsLoading(false);
-    }
+    // Start the Engine
+    loadModule(primarySymptom.code);
   };
 
-  const handleSendMessage = async (text: string) => {
-    if (!text.trim() || isLoading || !chatSession) return;
-
-    const currentInput = text;
+  const handleSendMessage = (text: string) => {
+    if (!text.trim() || isLoading) return;
+    
+    // Add User Message
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', text };
+    setMessages(prev => [...prev, userMsg]);
     setInputText('');
-    setIsLoading(true);
 
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      text: currentInput
-    };
-    
-    setMessages((prev) => [...prev, userMsg]);
-
-    const response = await sendMessageToGemini(chatSession, currentInput);
-    
-    const botMsg: Message = {
-      id: (Date.now() + 1).toString(),
-      role: 'model',
-      text: response.text,
-      options: response.options,
-      actionCard: response.actionCard
-    };
-
-    setMessages((prev) => [...prev, botMsg]);
-    setIsLoading(false);
+    // Process in Engine
+    processAnswer(text);
   };
 
   const handleEndSession = () => {
@@ -187,76 +184,63 @@ INSTRUCTION:
     setView('triage-wizard');
     setSelectedSymptoms([]);
     setMessages([]);
-    setChatSession(null);
     setSymptomSearch('');
+    setCurrentModuleId(null);
+    setIsConsultationComplete(false);
   };
 
   // --- FILTER LOGIC ---
   const filteredGroups = useMemo(() => {
     if (!symptomSearch.trim()) return Object.entries(SYMPTOM_GROUPS);
-    
     const query = symptomSearch.toLowerCase();
     return Object.entries(SYMPTOM_GROUPS).map(([category, symptoms]) => {
-      const filteredSymptoms = symptoms.filter(s => 
-        s.name.toLowerCase().includes(query)
-      );
+      const filteredSymptoms = symptoms.filter(s => s.name.toLowerCase().includes(query));
       return [category, filteredSymptoms] as [string, typeof symptoms];
     }).filter(([_, symptoms]) => symptoms.length > 0);
   }, [symptomSearch]);
 
-  // --- RENDER HELPERS ---
-
-  const renderWizardStep = () => {
-    return (
-      <div className="max-w-2xl mx-auto mt-10 px-4">
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-6 border-b border-slate-100 bg-red-50">
-             <div className="flex items-center gap-3 mb-2">
-               <AlertTriangle className="text-red-600" size={28} />
-               <h2 className="text-xl font-bold text-red-700">Life-Threatening Emergency Check</h2>
-             </div>
-             <p className="text-slate-700">Before we continue, are you experiencing any of these <span className="font-bold">IMMEDIATE</span> emergencies?</p>
-          </div>
-          
-          <div className="p-6 space-y-3">
-            {GLOBAL_EMERGENCY_CHECKS.map(item => (
-              <button
-                key={item.id}
-                onClick={() => handleWizardSelection(true)}
-                className="w-full text-left p-4 rounded-xl border-2 border-slate-100 hover:border-red-200 hover:bg-red-50 transition-all flex items-center gap-3 group"
-              >
-                 <div className="w-6 h-6 rounded-full border-2 border-slate-300 group-hover:border-red-400 flex items-center justify-center">
-                   <div className="w-3 h-3 rounded-full bg-red-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                 </div>
-                 <span className="font-medium text-slate-700 group-hover:text-red-900">{item.label}</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="p-6 bg-slate-50 border-t border-slate-100">
-             <button
-               onClick={() => handleWizardSelection(false)}
-               className="w-full py-4 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2"
-             >
-               <CheckCircle2 size={20} />
-               NO - I do not have these symptoms
-             </button>
-          </div>
-        </div>
-      </div>
-    );
+  const toggleSymptom = (name: string, code: string) => {
+    setSelectedSymptoms(prev => {
+      const exists = prev.find(s => s.code === code);
+      return exists ? prev.filter(s => s.code !== code) : [...prev, { name, code }];
+    });
   };
 
-  // --- MAIN RENDER ---
-
+  // --- RENDER HELPERS ---
   return (
     <div className="flex flex-col h-screen bg-slate-50 font-sans">
       <Header />
 
       {/* --- PHASE 1: EMERGENCY WIZARD --- */}
       {view === 'triage-wizard' && (
-        <main className="flex-1 overflow-y-auto pb-8">
-          {renderWizardStep()}
+        <main className="flex-1 overflow-y-auto pb-8 p-4">
+           <div className="max-w-2xl mx-auto mt-10 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-6 border-b border-slate-100 bg-red-50">
+                 <div className="flex items-center gap-3 mb-2">
+                   <AlertTriangle className="text-red-600" size={28} />
+                   <h2 className="text-xl font-bold text-red-700">Life-Threatening Emergency Check</h2>
+                 </div>
+                 <p className="text-slate-700">Before we continue, are you experiencing any of these <span className="font-bold">IMMEDIATE</span> emergencies?</p>
+              </div>
+              
+              <div className="p-6 space-y-3">
+                {GLOBAL_EMERGENCY_CHECKS.map(item => (
+                  <button key={item.id} onClick={() => setView('emergency-red')} className="w-full text-left p-4 rounded-xl border-2 border-slate-100 hover:border-red-200 hover:bg-red-50 transition-all flex items-center gap-3 group">
+                     <div className="w-6 h-6 rounded-full border-2 border-slate-300 group-hover:border-red-400 flex items-center justify-center">
+                       <div className="w-3 h-3 rounded-full bg-red-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                     </div>
+                     <span className="font-medium text-slate-700 group-hover:text-red-900">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="p-6 bg-slate-50 border-t border-slate-100">
+                 <button onClick={() => setView('symptom-selection')} className="w-full py-4 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl shadow-sm transition-colors flex items-center justify-center gap-2">
+                   <CheckCircle2 size={20} />
+                   NO - I do not have these symptoms
+                 </button>
+              </div>
+           </div>
         </main>
       )}
 
@@ -266,87 +250,37 @@ INSTRUCTION:
           <div className="max-w-4xl mx-auto">
             <div className="text-center mb-8">
               <h2 className="text-2xl font-bold text-slate-800">Consultation Mode</h2>
-              <p className="text-slate-500 mt-1">Global emergencies cleared. Please select ALL symptoms you are experiencing.</p>
+              <p className="text-slate-500 mt-1">Please select the primary symptom you are experiencing.</p>
             </div>
 
-            {/* SEARCH BAR & TOOLS */}
             <div className="flex flex-col md:flex-row gap-4 mb-8 max-w-2xl mx-auto">
               <div className="relative flex-1">
-                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                  <Search className="text-slate-400" size={20} />
-                </div>
-                <input
-                  type="text"
-                  className="block w-full pl-10 pr-3 py-3 border border-slate-200 rounded-xl leading-5 bg-white placeholder-slate-400 focus:outline-none focus:placeholder-slate-300 focus:ring-2 focus:ring-teal-500 focus:border-teal-500 sm:text-sm shadow-sm transition-all"
-                  placeholder="Search for a symptom..."
-                  value={symptomSearch}
-                  onChange={(e) => setSymptomSearch(e.target.value)}
-                />
+                <Search className="absolute left-3 top-3 text-slate-400" size={20} />
+                <input type="text" className="w-full pl-10 pr-3 py-3 border rounded-xl" placeholder="Search..." value={symptomSearch} onChange={(e) => setSymptomSearch(e.target.value)} />
               </div>
-              {selectedSymptoms.length > 0 && (
-                <button 
-                  onClick={clearSymptoms}
-                  className="px-4 py-2 bg-white border border-slate-200 text-slate-600 font-medium rounded-xl hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-colors flex items-center gap-2 justify-center shadow-sm"
-                >
-                  <RotateCcw size={18} />
-                  Clear Selection
-                </button>
-              )}
+              {selectedSymptoms.length > 0 && <button onClick={() => setSelectedSymptoms([])} className="px-4 border rounded-xl hover:bg-red-50 text-slate-600"><RotateCcw size={18} /> Clear</button>}
             </div>
 
             <div className="grid md:grid-cols-2 gap-6">
-              {filteredGroups.length > 0 ? (
-                filteredGroups.map(([category, symptoms]) => (
-                  <div key={category} className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
-                    <h3 className="font-bold text-lg text-teal-800 mb-4 flex items-center gap-2">
-                      <Activity size={18} />
-                      {category}
-                    </h3>
-                    <div className="grid grid-cols-2 gap-3">
-                      {symptoms.map(sym => {
-                        const isSelected = selectedSymptoms.some(s => s.code === sym.code);
-                        return (
-                          <button
-                            key={sym.code + sym.name}
-                            onClick={() => toggleSymptom(sym.name, sym.code)}
-                            className={`p-3 text-sm font-medium rounded-xl border transition-all text-left flex items-start justify-between group ${
-                              isSelected 
-                                ? 'bg-teal-600 text-white border-teal-600 shadow-md transform scale-[1.02]' 
-                                : 'bg-slate-50 text-slate-600 border-slate-100 hover:border-teal-300 hover:bg-teal-50'
-                            }`}
-                          >
-                            {sym.name}
-                            {isSelected && <Check size={16} className="text-white ml-2 shrink-0" />}
-                          </button>
-                        );
-                      })}
-                    </div>
+              {filteredGroups.map(([category, symptoms]) => (
+                <div key={category} className="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+                  <h3 className="font-bold text-lg text-teal-800 mb-4 flex items-center gap-2"><Activity size={18} />{category}</h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    {symptoms.map(sym => (
+                      <button key={sym.code} onClick={() => toggleSymptom(sym.name, sym.code)} className={`p-3 text-sm font-medium rounded-xl border text-left ${selectedSymptoms.some(s => s.code === sym.code) ? 'bg-teal-600 text-white' : 'bg-slate-50 hover:bg-teal-50'}`}>
+                        {sym.name} {selectedSymptoms.some(s => s.code === sym.code) && <Check size={16} className="inline ml-1"/>}
+                      </button>
+                    ))}
                   </div>
-                ))
-              ) : (
-                <div className="col-span-2 text-center py-12 text-slate-400">
-                   <p className="text-lg">No symptoms found matching "{symptomSearch}"</p>
-                   <button 
-                     onClick={() => setSymptomSearch('')}
-                     className="mt-2 text-teal-600 font-medium hover:underline"
-                   >
-                     Clear search
-                   </button>
                 </div>
-              )}
+              ))}
             </div>
           </div>
           
-          {/* Floating Action Button */}
-          <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/80 backdrop-blur-md border-t border-slate-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+          <div className="fixed bottom-0 left-0 right-0 p-4 bg-white border-t">
              <div className="max-w-2xl mx-auto">
-                <button
-                  onClick={handleStartConsultation}
-                  disabled={selectedSymptoms.length === 0}
-                  className="w-full py-4 bg-teal-600 hover:bg-teal-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold text-lg rounded-xl shadow-lg transition-all flex items-center justify-center gap-3"
-                >
-                  {selectedSymptoms.length === 0 ? 'Select Symptoms to Continue' : `Start Assessment (${selectedSymptoms.length})`}
-                  {selectedSymptoms.length > 0 && <Send size={20} />}
+                <button onClick={handleStartConsultation} disabled={selectedSymptoms.length === 0} className="w-full py-4 bg-teal-600 text-white font-bold rounded-xl disabled:bg-slate-300">
+                  {selectedSymptoms.length === 0 ? 'Select a Symptom' : 'Start Assessment'}
                 </button>
              </div>
           </div>
@@ -357,54 +291,34 @@ INSTRUCTION:
       {view === 'emergency-red' && (
         <div className="flex flex-col h-screen bg-red-600 text-white items-center justify-center p-6 text-center z-50 fixed inset-0">
           <AlertOctagon size={80} className="mb-6 animate-pulse" />
-          <h1 className="text-4xl font-bold mb-4 tracking-tight">STOP. CALL 911.</h1>
-          <p className="text-xl mb-8 max-w-lg font-medium leading-relaxed opacity-90">
-            You selected a symptom that indicates a life-threatening emergency.
-          </p>
-          <a href="tel:911" className="flex items-center justify-center gap-3 w-full max-w-md bg-white text-red-600 py-5 rounded-2xl font-bold text-2xl shadow-xl hover:bg-red-50 transition-colors">
-            <Phone size={28} />
-            DIAL 911 NOW
-          </a>
-          <button onClick={() => setView('triage-wizard')} className="mt-12 text-red-200 underline text-sm">
-            I made a mistake - Restart
-          </button>
+          <h1 className="text-4xl font-bold mb-4">STOP. CALL 911.</h1>
+          <a href="tel:911" className="bg-white text-red-600 py-5 px-10 rounded-2xl font-bold text-2xl shadow-xl">DIAL 911 NOW</a>
+          <button onClick={() => setView('triage-wizard')} className="mt-12 text-red-200 underline">Restart</button>
         </div>
       )}
 
-      {/* --- PHASE 3: SMART CHAT --- */}
+      {/* --- PHASE 3: CHAT --- */}
       {view === 'chat' && (
         <>
           <main className="flex-1 overflow-y-auto p-4 md:p-6 scrollbar-hide bg-slate-50">
             <div className="max-w-3xl mx-auto flex flex-col min-h-full pb-4">
                <div className="flex justify-between items-center mb-6 border-b border-slate-200 pb-4">
-                  <div className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-                    Consultation Active
-                  </div>
-                  <button 
-                    onClick={() => setShowEndSessionConfirm(true)}
-                    className="text-teal-600 text-xs font-bold hover:underline flex items-center gap-1"
-                  >
-                    <LogOut size={14} />
-                    END SESSION
-                  </button>
+                  <div className="text-xs font-bold text-slate-400 uppercase flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>Consultation Active</div>
+                  <button onClick={() => setShowEndSessionConfirm(true)} className="text-teal-600 text-xs font-bold flex items-center gap-1"><LogOut size={14} /> END SESSION</button>
                </div>
 
                {messages.map((msg) => (
                   <div key={msg.id}>
-                    <ChatMessage 
-                      message={msg} 
-                      onOptionSelect={(opt) => handleSendMessage(opt)}
-                    />
+                    <ChatMessage message={msg} onOptionSelect={(opt) => handleSendMessage(opt)} />
                     {msg.actionCard && <TriageCard card={msg.actionCard} />}
                   </div>
                 ))}
                 
                 {isLoading && (
                   <div className="flex justify-start mb-6 animate-pulse">
-                    <div className="flex items-center gap-2 bg-white px-4 py-3 rounded-2xl rounded-tl-none border border-slate-100 shadow-sm">
+                    <div className="flex items-center gap-2 bg-white px-4 py-3 rounded-2xl border border-slate-100">
                       <Loader2 className="animate-spin text-teal-600" size={18} />
-                      <span className="text-sm text-slate-500 font-medium">Assessing protocol...</span>
+                      <span className="text-sm text-slate-500">Processing answer...</span>
                     </div>
                   </div>
                 )}
@@ -413,61 +327,29 @@ INSTRUCTION:
           </main>
 
           <div className="bg-white border-t border-slate-200 p-4 sticky bottom-0 z-20">
-            <div className="max-w-3xl mx-auto">
-              <div className="relative flex items-end gap-2 bg-slate-50 border border-slate-300 rounded-2xl px-2 py-2 focus-within:ring-2 focus-within:ring-teal-500 focus-within:border-teal-500 focus-within:bg-white transition-all shadow-sm">
-                <textarea
+            <div className="max-w-3xl mx-auto flex gap-2">
+                <input
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage(inputText);
-                    }
-                  }}
-                  placeholder="Type your answer..."
-                  className="w-full bg-transparent border-none focus:ring-0 text-slate-700 placeholder:text-slate-400 resize-none max-h-32 py-2 px-2 text-sm md:text-base scrollbar-hide"
-                  rows={1}
-                  style={{ minHeight: '44px' }}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage(inputText)}
+                  disabled={isLoading || isConsultationComplete}
+                  placeholder={isConsultationComplete ? "Consultation ended." : "Type your answer..."}
+                  className="flex-1 bg-slate-50 border rounded-xl px-4 py-3 focus:ring-2 focus:ring-teal-500 outline-none"
                 />
-                <Button 
-                  onClick={() => handleSendMessage(inputText)} 
-                  disabled={!inputText.trim() || isLoading}
-                  className="mb-0.5 rounded-xl h-10 w-10 !p-0 flex items-center justify-center shrink-0"
-                >
+                <Button onClick={() => handleSendMessage(inputText)} disabled={!inputText.trim() || isLoading || isConsultationComplete} className="rounded-xl w-12 flex items-center justify-center p-0">
                   <Send size={18} />
                 </Button>
-              </div>
             </div>
           </div>
 
-          {/* END SESSION CONFIRMATION MODAL */}
           {showEndSessionConfirm && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-              <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full overflow-hidden transform transition-all scale-100">
-                <div className="p-6 text-center">
-                  <div className="w-12 h-12 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <AlertTriangle size={24} />
-                  </div>
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+              <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 text-center">
                   <h3 className="text-lg font-bold text-slate-800 mb-2">End Consultation?</h3>
-                  <p className="text-slate-600 text-sm">
-                    Are you sure you want to end the current session? All chat history and progress will be cleared.
-                  </p>
-                </div>
-                <div className="flex border-t border-slate-100">
-                  <button 
-                    onClick={() => setShowEndSessionConfirm(false)}
-                    className="flex-1 py-4 text-slate-600 font-medium hover:bg-slate-50 transition-colors focus:outline-none"
-                  >
-                    Cancel
-                  </button>
-                  <div className="w-px bg-slate-100"></div>
-                  <button 
-                    onClick={handleEndSession}
-                    className="flex-1 py-4 text-red-600 font-bold hover:bg-red-50 transition-colors focus:outline-none"
-                  >
-                    End Session
-                  </button>
-                </div>
+                  <div className="flex gap-4 mt-6">
+                    <button onClick={() => setShowEndSessionConfirm(false)} className="flex-1 py-3 text-slate-600 bg-slate-100 rounded-xl font-medium">Cancel</button>
+                    <button onClick={handleEndSession} className="flex-1 py-3 text-white bg-red-600 rounded-xl font-bold">End Session</button>
+                  </div>
               </div>
             </div>
           )}
