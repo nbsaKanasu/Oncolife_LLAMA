@@ -1,91 +1,202 @@
+
 import json
 import boto3
 import os
+import time
+from botocore.exceptions import ClientError
 
-# Initialize Bedrock client
-# Ensure the region matches where you enabled the Llama 3 model (often us-east-1 or us-west-2)
-bedrock = boto3.client(service_name='bedrock-runtime', region_name='us-east-1') 
+# --- CONFIGURATION ---
+DYNAMODB_TABLE = os.environ.get('TABLE_NAME', 'OncoLifeSessions')
+BEDROCK_REGION = 'us-east-1' # Change to your region
+MODEL_ID = 'meta.llama3-70b-instruct-v1:0'
 
-# Model ID for Llama 3 70B Instruct
-MODEL_ID = 'meta.llama3-70b-instruct-v1:0' 
+# Initialize Clients
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table(DYNAMODB_TABLE)
+bedrock = boto3.client(service_name='bedrock-runtime', region_name=BEDROCK_REGION)
 
-def format_llama3_prompt(system_prompt, messages):
+# --- CLINICAL PROTOCOLS (THE BRAIN) ---
+# Strictly defined in Python. No hallucinations possible.
+
+CALL_911 = {
+    "title": "CRITICAL EMERGENCY",
+    "action": "Call 911 Immediately",
+    "timing": "Immediately",
+    "script": "I am a cancer patient experiencing a medical emergency.",
+    "level": "RED"
+}
+
+CONTACT_TEAM = {
+    "title": "URGENT CLINICAL ALERT",
+    "action": "Contact Care Team Now",
+    "timing": "Immediately",
+    "script": "I need urgent assessment.",
+    "level": "YELLOW"
+}
+
+PROTOCOLS = {
+    "URG-109": { # Headache
+        "questions": [
+            {
+                "id": "Q1",
+                "text": "Is this the worst headache you've ever had, or did it start suddenly and very strongly?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": CALL_911}, "No": {"action": "NEXT"}}
+            },
+            {
+                "id": "Q2",
+                "text": "Do you have blurred vision, trouble speaking, or confusion?",
+                "options": ["Yes", "No"],
+                "logic": {"Yes": {"action": "CARD", "card": CALL_911}, "No": {"action": "NEXT"}}
+            },
+            {
+                "id": "Q3",
+                "text": "Rate your pain severity.",
+                "options": ["Mild", "Moderate", "Severe"],
+                "logic": {
+                    "Severe": {"action": "CARD", "card": CONTACT_TEAM},
+                    "Moderate": {"action": "CARD", "card": CONTACT_TEAM},
+                    "Mild": {"action": "CARD", "card": {"title": "MONITOR", "action": "Monitor at home", "timing": "As needed", "script": "Watch symptoms", "level": "GREEN"}}
+                }
+            }
+        ]
+    },
+    # Add other modules (URG-111, URG-103) here following the same pattern
+}
+
+# --- HELPER FUNCTIONS ---
+
+def classify_user_intent(user_text, options):
     """
-    Formats the chat history into Llama 3's specific prompt structure.
+    Uses Llama 3 to map fuzzy user text to a specific Option.
+    Example: "It hurts like hell" -> "Severe"
     """
-    formatted_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|>"
+    system_prompt = f"""
+    You are a data classifier. 
+    Map the User Input to exactly one of the Allowed Options.
+    User Input: "{user_text}"
+    Allowed Options: {json.dumps(options)}
+    Output JSON ONLY: {{ "selected": "OptionName" }}
+    """
     
-    for msg in messages:
-        role = "user" if msg['role'] == 'user' else "assistant"
-        content = msg['text']
-        formatted_prompt += f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
-    
-    # Append the start of the assistant's turn
-    formatted_prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
-    return formatted_prompt
+    prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+
+    try:
+        response = bedrock.invoke_model(
+            modelId=MODEL_ID,
+            body=json.dumps({"prompt": prompt, "temperature": 0.0, "max_gen_len": 50})
+        )
+        response_body = json.loads(response.get('body').read())
+        gen_text = response_body['generation'].strip()
+        
+        # Extract JSON from potential markdown
+        if "{" in gen_text:
+            json_str = gen_text[gen_text.find("{"):gen_text.rfind("}")+1]
+            data = json.loads(json_str)
+            return data.get("selected", options[0])
+        return options[0] # Fallback
+    except Exception as e:
+        print(f"Bedrock Error: {e}")
+        return options[0] # Fail safe
 
 def lambda_handler(event, context):
-    # 1. Handle CORS (For React Frontend)
-    # This allows your frontend hosted on a different domain to call this function
-    http_method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method')
-    
-    if http_method == 'OPTIONS':
+    # CORS
+    if event.get('httpMethod') == 'OPTIONS':
         return {
             'statusCode': 200,
-            'headers': {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Headers': 'Content-Type',
-                'Access-Control-Allow-Methods': 'OPTIONS,POST'
-            },
+            'headers': {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type'},
             'body': ''
         }
 
     try:
-        # 2. Parse Request Body
-        body_str = event.get('body', '{}')
-        body = json.loads(body_str) if body_str else {}
+        body = json.loads(event.get('body', '{}'))
+        session_id = body.get('sessionId')
+        user_text = body.get('text')
+        start_module = body.get('startModule') # Sent only on first request
+
+        # 1. LOAD STATE
+        if not session_id:
+            return {'statusCode': 400, 'body': 'Missing sessionId'}
+            
+        db_response = table.get_item(Key={'session_id': session_id})
+        state = db_response.get('Item')
+
+        # 2. INITIALIZE IF NEW
+        if not state:
+            if not start_module or start_module not in PROTOCOLS:
+                # Default to Generic if module not found
+                start_module = "URG-109" 
+            
+            state = {
+                'session_id': session_id,
+                'current_module': start_module,
+                'q_index': 0,
+                'history': []
+            }
+            # Don't return yet, we need to get the first question
+            current_protocol = PROTOCOLS[state['current_module']]
+            question = current_protocol['questions'][0]
+            
+            # Save Initial State
+            table.put_item(Item=state)
+            
+            return {
+                'statusCode': 200,
+                'headers': {'Access-Control-Allow-Origin': '*'},
+                'body': json.dumps({
+                    'text': question['text'],
+                    'options': question['options']
+                })
+            }
+
+        # 3. PROCESS USER ANSWER (IF EXISTING SESSION)
+        current_protocol = PROTOCOLS.get(state['current_module'])
+        if not current_protocol:
+             return {'statusCode': 500, 'body': 'Invalid State'}
+
+        q_index = int(state['q_index'])
+        question = current_protocol['questions'][q_index]
+
+        # Call Bedrock to classify answer
+        selected_option = classify_user_intent(user_text, question['options'])
         
-        history = body.get('history', []) 
-        system_instruction = body.get('systemInstruction', '')
+        # Check Logic
+        logic = question['logic'].get(selected_option)
+        if not logic:
+             # Fallback if AI hallucinates an option not in list
+             logic = list(question['logic'].values())[0]
+
+        # 4. DETERMINE NEXT STEP
+        response_payload = {}
         
-        # 3. Construct Llama 3 Prompt
-        prompt = format_llama3_prompt(system_instruction, history)
-
-        # 4. Payload for Bedrock
-        payload = {
-            "prompt": prompt,
-            "max_gen_len": 1024,
-            "temperature": 0.0, # Strict adherence for medical triage
-            "top_p": 0.9
-        }
-
-        # 5. Invoke Bedrock
-        response = bedrock.invoke_model(
-            modelId=MODEL_ID,
-            contentType='application/json',
-            accept='application/json',
-            body=json.dumps(payload)
-        )
-
-        # 6. Parse Response
-        response_body = json.loads(response.get('body').read())
-        generated_text = response_body['generation']
+        if logic['action'] == 'CARD':
+            response_payload = {'actionCard': logic['card']}
+            # We might delete session here or mark complete
+        
+        elif logic['action'] == 'NEXT':
+            next_index = q_index + 1
+            if next_index < len(current_protocol['questions']):
+                next_q = current_protocol['questions'][next_index]
+                state['q_index'] = next_index
+                table.put_item(Item=state) # Update DB
+                response_payload = {
+                    'text': next_q['text'],
+                    'options': next_q['options']
+                }
+            else:
+                # End of flow default
+                response_payload = {'actionCard': {"title": "COMPLETE", "action": "Monitor", "level": "GREEN"}}
 
         return {
             'statusCode': 200,
-            'headers': {
-                'Access-Control-Allow-Origin': '*',
-                'Content-Type': 'application/json'
-            },
-            'body': json.dumps({'text': generated_text})
+            'headers': {'Access-Control-Allow-Origin': '*'},
+            'body': json.dumps(response_payload)
         }
 
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(e)
         return {
             'statusCode': 500,
-            'headers': {
-                'Access-Control-Allow-Origin': '*',
-            },
+            'headers': {'Access-Control-Allow-Origin': '*'},
             'body': json.dumps({'error': str(e)})
         }

@@ -1,53 +1,58 @@
 
-DEPLOYMENT INSTRUCTIONS FOR ONCOLIFE (AWS + LLAMA 3)
-====================================================
+DEPLOYMENT INSTRUCTIONS FOR ONCOLIFE (AWS ENTERPRISE EDITION)
+=============================================================
 
-This folder (AWS_LLAMA) contains two distinct parts:
-1. backend/ -> The Python code for AWS Lambda.
-2. frontend/ -> The React application code.
+ARCHITECTURE: OPTION 3 (Server-Side Logic + DynamoDB Persistence)
+-----------------------------------------------------------------
+This version implements a "Neuro-Symbolic" architecture:
+1. React Frontend: Dumb UI (Displays questions, sends answers).
+2. AWS Lambda: The Brain (Holds the Medical Protocols & Logic).
+3. AWS Bedrock (Llama 3): The Translator (Classifies user text into strict options).
+4. DynamoDB: The Memory (Stores session state).
 
 ----------------------------------------------------
-PART 1: DEPLOYING THE BACKEND (AWS LAMBDA)
+PART 1: INFRASTRUCTURE SETUP
+----------------------------------------------------
+
+1. **DYNAMODB TABLE**
+   - Go to AWS Console -> DynamoDB -> Create Table.
+   - Table Name: `OncoLifeSessions`
+   - Partition Key: `session_id` (String)
+   - Sort Key: (Leave empty)
+   - Settings: Default settings are fine (On-demand capacity recommended).
+
+2. **AWS BEDROCK**
+   - Go to Bedrock Console -> Model access.
+   - Ensure "Llama 3 70B Instruct" is enabled.
+
+----------------------------------------------------
+PART 2: DEPLOYING THE BACKEND (LAMBDA)
 ----------------------------------------------------
 1. Go to the 'backend' folder.
 2. Rename 'lambda_function.txt' to 'lambda_function.py'.
-3. You need to create a deployment package (ZIP) that includes the 'boto3' library if the AWS Lambda runtime doesn't have the latest version, but usually, for standard Bedrock usage, the default Python 3.9+ runtime might suffice. 
-   - Best Practice: 
-     a. Create a folder named 'package'.
-     b. Run: pip install --target ./package boto3
-     c. Copy 'lambda_function.py' into 'package'.
-     d. Zip the contents of 'package'.
-4. Log in to AWS Console -> Lambda.
-5. Create a new Function:
-   - Name: OncoLifeBackend
-   - Runtime: Python 3.10 (or 3.9)
-   - Architecture: x86_64
-6. Upload your ZIP file.
-7. Configuration -> Permissions (Execution Role):
-   - Click the Role Name.
-   - Add Permissions -> Attach Policies -> Search for "BedrockFullAccess" (or create a specific policy allowing 'bedrock:InvokeModel').
-8. Configuration -> Function URL:
-   - Create function URL.
-   - Auth type: NONE (for testing) or AWS_IAM (if integrating with Amplify Auth).
-   - COPY THIS URL. You will need it for the frontend.
-9. **IMPORTANT**: Go to AWS Bedrock Console -> Model Access -> Enable "Llama 3 70B Instruct".
+3. Create a deployment zip:
+   - Create a folder named 'package'.
+   - Run: `pip install --target ./package boto3`
+   - Copy 'lambda_function.py' into 'package'.
+   - Zip the contents of 'package'.
+4. Create Lambda Function:
+   - Runtime: Python 3.9+
+   - Upload Zip.
+5. **PERMISSIONS (Crucial)**
+   - Go to Configuration -> Permissions -> Execution Role.
+   - Add permissions for:
+     a. `bedrock:InvokeModel`
+     b. `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:UpdateItem`
+6. **ENVIRONMENT VARIABLES**
+   - Go to Configuration -> Environment variables.
+   - Add: `TABLE_NAME` = `OncoLifeSessions`
+7. Create Function URL (Auth: NONE for testing) and COPY IT.
 
 ----------------------------------------------------
-PART 2: DEPLOYING THE FRONTEND
+PART 3: DEPLOYING THE FRONTEND
 ----------------------------------------------------
-1. Go to the 'frontend' folder.
-2. Create a file named '.env' in the root of 'frontend'.
-3. Add the following line to '.env':
-   VITE_AWS_API_URL=https://<YOUR_LAMBDA_FUNCTION_URL_FROM_STEP_8>
-4. Build the project:
-   - Run: npm install
-   - Run: npm run build
-5. Deploy the 'dist' folder:
-   - Option A (AWS Amplify): Connect your Git repo, point it to the 'AWS_LLAMA/frontend' folder. Add the Environment Variable 'VITE_AWS_API_URL' in the Amplify Console.
-   - Option B (S3 Bucket): Upload the contents of 'dist' to an S3 bucket enabled for Static Website Hosting.
-
-----------------------------------------------------
-NOTES
-----------------------------------------------------
-- The frontend uses 'services/apiService.ts' which specifically fetches from your Lambda URL.
-- The 'constants.ts' file has been optimized for Llama 3 prompt engineering constraints.
+1. Go to 'frontend' folder.
+2. Create '.env' file:
+   `VITE_AWS_API_URL=https://<YOUR_LAMBDA_URL>`
+3. Run `npm install` and `npm run build`.
+4. Deploy the `dist` folder to AWS Amplify or S3.
