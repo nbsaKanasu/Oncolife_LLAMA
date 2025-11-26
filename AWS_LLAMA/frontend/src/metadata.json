@@ -1,0 +1,5 @@
+{
+  "name": "OncoLife LLM (AWS)",
+  "description": "Oncology triage system powered by Llama 3 on AWS.",
+  "requestFramePermissions": []
+}

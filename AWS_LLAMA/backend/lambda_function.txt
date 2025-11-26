@@ -1,0 +1,89 @@
+import json
+import boto3
+import os
+
+# Initialize Bedrock client
+# Ensure the region matches where you enabled the Llama 3 model
+bedrock = boto3.client(service_name='bedrock-runtime', region_name='us-east-1') 
+
+# Model ID for Llama 3 70B Instruct
+MODEL_ID = 'meta.llama3-70b-instruct-v1:0' 
+
+def format_llama3_prompt(system_prompt, messages):
+    """
+    Formats the chat history into Llama 3's specific prompt structure.
+    """
+    formatted_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|>"
+    
+    for msg in messages:
+        role = "user" if msg['role'] == 'user' else "assistant"
+        content = msg['text']
+        formatted_prompt += f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
+    
+    # Append the start of the assistant's turn
+    formatted_prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+    return formatted_prompt
+
+def lambda_handler(event, context):
+    # 1. Handle CORS (For React Frontend)
+    # This allows your frontend hosted on a different domain to call this function
+    if event.get('httpMethod') == 'OPTIONS':
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type',
+                'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            },
+            'body': ''
+        }
+
+    try:
+        # 2. Parse Request Body
+        body_str = event.get('body', '{}')
+        body = json.loads(body_str) if body_str else {}
+        
+        history = body.get('history', []) 
+        system_instruction = body.get('systemInstruction', '')
+        
+        # 3. Construct Llama 3 Prompt
+        prompt = format_llama3_prompt(system_instruction, history)
+
+        # 4. Payload for Bedrock
+        payload = {
+            "prompt": prompt,
+            "max_gen_len": 1024,
+            "temperature": 0.0, # Strict adherence for medical triage
+            "top_p": 0.9
+        }
+
+        # 5. Invoke Bedrock
+        response = bedrock.invoke_model(
+            modelId=MODEL_ID,
+            contentType='application/json',
+            accept='application/json',
+            body=json.dumps(payload)
+        )
+
+        # 6. Parse Response
+        response_body = json.loads(response.get('body').read())
+        generated_text = response_body['generation']
+
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+                'Content-Type': 'application/json'
+            },
+            'body': json.dumps({'text': generated_text})
+        }
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': {
+                'Access-Control-Allow-Origin': '*',
+            },
+            'body': json.dumps({'error': str(e)})
+        }
