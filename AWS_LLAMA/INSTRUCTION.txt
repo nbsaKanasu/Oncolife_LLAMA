@@ -9,6 +9,7 @@ This version implements a "Neuro-Symbolic" architecture:
 2. AWS Lambda: The Brain (Holds the Medical Protocols & Logic).
 3. AWS Bedrock (Llama 3): The Translator (Classifies user text into strict options).
 4. DynamoDB: The Memory (Stores session state).
+5. Uses Amazon Amplify for hosting  
 
 ----------------------------------------------------
 PART 1: INFRASTRUCTURE SETUP
@@ -76,3 +77,59 @@ PART 4: VERIFICATION
 - Go to AWS DynamoDB Console -> Tables -> OncoLifeSessions -> Explore Table items.
 - You should see a new entry with your `session_id`.
 - If you refresh the page, the Frontend should now retrieve the same session ID from localStorage and allow you to continue (provided you implement history fetching in Lambda, otherwise it simply maintains the ID for consistent tracking).
+
+
+
+
+Amazon Amplify 
+
+
+Log into the AWS Management Console and search for AWS Amplify.
+
+Select Amplify Hosting and click Create new app (or Host web app).
+
+Choose GitHub as your service provider and click Next.
+
+Authorize AWS to access your GitHub account.
+
+From the dropdown, select your repository and the main branch, then click Next.
+
+Step 3: Configure Build & Environment Variables (Critical for Vite)
+Amplify will auto-detect your project as a Vite app, but you must manually inject your Lambda URL so it's available during the build process.
+
+Environment Variables: On the "Build settings" page, click Environment variables.
+
+Key: VITE_AWS_API_URL
+
+Value: (Paste your Lambda Function URL).
+
+Edit Build Settings (YAML): Click Edit on the build specification and update the build phase. Vite requires variables to be explicitly passed during the build command. Update your YAML to look like this:
+
+YAML
+
+
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - npm ci
+    build:
+      commands:
+        # This line ensures your Lambda URL is baked into the build
+        - echo "VITE_AWS_API_URL=$VITE_AWS_API_URL" >> .env
+        - npm run build
+  artifacts:
+    baseDirectory: dist
+    files:
+      - '**/*'
+
+
+
+Click Next, review your settings, and click Save and deploy.
+
+Step 4: Verify Deployment
+Amplify will show three stages: Provision, Build, and Deploy.
+
+Once finished, click the Visit deployed URL link provided in the console.
+
+Final Step: Go back to your AWS Lambda Console > Configuration > Function URL and update the CORS Allowed Origin from * to your new Amplify URL (e.g., https://main.d123.amplifyapp.com) for better security.
